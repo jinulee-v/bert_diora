@@ -1,0 +1,6 @@
+nltk
+
+torch
+transformers
+tokenizers
+sentencepiece
