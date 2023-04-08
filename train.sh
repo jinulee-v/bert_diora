@@ -1,0 +1,1 @@
+python train.py --train_data data/ptb_train.txt --dev_data data/ptb_dev.txt --batch_size 8
