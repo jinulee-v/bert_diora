@@ -89,9 +89,11 @@ def main(args):
 
     # Define optimizer
     optimizer = Adam(model.parameters(), lr=args.lr)
+    optimizer.zero_grad()
 
     min_loss = 1e+10
     early_stop_count = 0
+    loss = 0
     for epoch in range(args.epoch):  # loop over the dataset multiple times
         if resume_training:
             # If resume training from an error, skip to the halted epoch/step
@@ -107,15 +109,18 @@ def main(args):
                 if (epoch, i) <= resume_epoch_step: 
                     continue
 
-            # zero the parameter gradients
-            optimizer.zero_grad()
             
             # DEBUG truncate each batch
 
             # forward + backward + optimize
             loss = model(batch)
             loss.backward()
-            optimizer.step()
+
+            if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
+                optimizer.step()
+                # zero the parameter gradients
+                optimizer.zero_grad()
+                loss = 0
 
             if i % args.log_interval == args.log_interval-1 or i == epoch_size-1:
                 # Eval phase (on dev set)
@@ -171,6 +176,7 @@ if __name__ == "__main__":
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=8, help="training batch size")
+    parser.add_argument("--update_freq", type=int, default=1, help="gradient accumulation for virtually larger batches")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate (default: Adam optimizer)")
     parser.add_argument("--epoch", type=int, default=5, help="epoch count")
     parser.add_argument("--unfreeze", action='store_true', help="If set, we also train the underlying parameter too.")

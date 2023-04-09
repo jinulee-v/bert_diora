@@ -249,6 +249,4 @@ class BertDiora(nn.Module):
         loss = torch.sum(loss) # single-element tensor
         loss /= sum(sent_lengths) # normalize
 
-        print("Loss:", loss)
-        print("Time(s):", time.time() - start_time)
         return loss

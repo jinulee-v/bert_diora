@@ -34,5 +34,4 @@ class TokenizedLengthSampler(Sampler[List[int]]):
     
     def __iter__(self) -> Iterator[List[int]]:
         for batch in self.batches:
-            print([self.seq_lengths[i] for i in batch])
             yield batch
