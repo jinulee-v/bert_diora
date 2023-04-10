@@ -3,7 +3,7 @@ from typing import *
 import torch
 import torch.nn as nn
 
-from transformers import AutoModel, AutoTokenizer, AutoConfig
+from transformers import AutoModel, AutoTokenizer, AutoConfig, PreTrainedModel
 
 from nltk.tokenize.treebank import TreebankWordTokenizer, TreebankWordDetokenizer
 
@@ -62,11 +62,9 @@ class BertDiora(nn.Module):
 
         # Load pretrained transformers
         # (after the initialization to prevent BERT being reset)
-        self.model = AutoModel.from_pretrained(model_id).to(device)
+        self.model: PreTrainedModel = AutoModel.from_pretrained(model_id).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        if freeze:
-            for p in self.model.parameters():
-                p.requires_grad = False
+        self.freeze = freeze
 
         if nltk_tok == "ptb":
             self.nltk_tokenize = TreebankWordTokenizer().tokenize
@@ -85,7 +83,11 @@ class BertDiora(nn.Module):
         attention_masks = tokenized_sentences.attention_mask.to(self.device)
 
         # Generate embeddings using the transformer model
-        outputs = self.model(input_ids, attention_mask=attention_masks)
+        if self.freeze:
+            with torch.no_grad():
+                outputs = self.model(input_ids, attention_mask=attention_masks)
+        else:
+            outputs = self.model(input_ids, attention_mask=attention_masks)
         embeddings = outputs[0]
 
         # Get the list of NLTK tokens for each sentence

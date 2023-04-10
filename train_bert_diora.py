@@ -108,8 +108,6 @@ def main(args):
                 # If resume training from an error, skip to the halted epoch/step
                 if (epoch, i) <= resume_epoch_step: 
                     continue
-            if i < 235: #DEBUG
-                continue
 
             try:
                 # forward + backward + optimize
