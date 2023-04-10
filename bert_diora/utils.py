@@ -10,7 +10,7 @@ class TokenizedLengthSampler(Sampler[List[int]]):
     PyTorch DataLoader - compatible sampler class that batchify sentences with the most similar lengths for maximum efficiency.
     """
 
-    def __init__(self, data_source: List[str], batch_size: int):
+    def __init__(self, data_source: List[str], batch_size: int, seed: int):
         self.data_source = data_source
         self.length = len(data_source)
         self.batch_size = batch_size
@@ -26,7 +26,9 @@ class TokenizedLengthSampler(Sampler[List[int]]):
             batches.append(indices[start:end])
             
         self.length_batches = len(batches)
-        self.batches = [batches[i] for i in torch.randperm(n=self.length_batches, dtype=torch.long).tolist()]
+        g_cpu = torch.Generator()
+        g_cpu.manual_seed(seed)
+        self.batches = [batches[i] for i in torch.randperm(n=self.length_batches, dtype=torch.long, generator=g_cpu).tolist()]
         self.seq_lengths = seq_lengths
 
     def __len__(self):

@@ -108,18 +108,27 @@ def main(args):
                 # If resume training from an error, skip to the halted epoch/step
                 if (epoch, i) <= resume_epoch_step: 
                     continue
+            if i < 235: #DEBUG
+                continue
 
-            
-            # DEBUG truncate each batch
+            try:
+                # forward + backward + optimize
+                loss = model(batch)
+                loss.backward()
 
-            # forward + backward + optimize
-            loss = model(batch)
-            loss.backward()
-
-            if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
-                optimizer.step()
-                # zero the parameter gradients
-                optimizer.zero_grad()
+                if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
+                    optimizer.step()
+                    # zero the parameter gradients
+                    optimizer.zero_grad()
+                    loss = 0
+            except Exception as e:
+                logger.warning(str(e))
+                logger.info("Exception occured; returning to training")
+                gc.collect()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.empty_cache()
+            finally:
                 loss = 0
 
             if i % args.log_interval == args.log_interval-1 or i == epoch_size-1:
