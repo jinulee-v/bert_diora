@@ -6,6 +6,11 @@ pyvenv.cfg
 __pycache__
 share
 
+# Raw data distribution
+data/ptb/*
+# Model checkpoints
+checkpoints
+
 *.pt
 *.log
 *.out

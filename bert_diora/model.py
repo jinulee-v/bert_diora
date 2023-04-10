@@ -65,7 +65,8 @@ class BertDiora(nn.Module):
         self.model = AutoModel.from_pretrained(model_id).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         if freeze:
-            self.model.requires_grad = False
+            for p in self.model.parameters():
+                p.requires_grad = False
 
         if nltk_tok == "ptb":
             self.nltk_tokenize = TreebankWordTokenizer().tokenize

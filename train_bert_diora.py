@@ -84,8 +84,8 @@ def main(args):
         train_data = file.readlines()
     with open(args.dev_data, "r", encoding='UTF-8') as file:
         dev_data = file.readlines()
-    train_loader = DataLoader(train_data, batch_sampler=TokenizedLengthSampler(train_data, args.batch_size))
-    dev_loader = DataLoader(dev_data, batch_sampler=TokenizedLengthSampler(dev_data, args.batch_size))
+    train_loader = DataLoader(train_data, batch_sampler=TokenizedLengthSampler(train_data, args.batch_size, seed=args.torch_seed))
+    dev_loader = DataLoader(dev_data, batch_sampler=TokenizedLengthSampler(dev_data, args.batch_size, seed=args.torch_seed))
 
     # Define optimizer
     optimizer = Adam(model.parameters(), lr=args.lr)
