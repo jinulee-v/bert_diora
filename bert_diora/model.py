@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from transformers import AutoModel, AutoTokenizer, AutoConfig, PreTrainedModel
 
-from nltk.tokenize.treebank import TreebankWordTokenizer, TreebankWordDetokenizer
+from nltk.tokenize.treebank import TreebankWordTokenizer
 
 torch.autograd.set_detect_anomaly(True)
 import time
@@ -68,15 +68,17 @@ class BertDiora(nn.Module):
 
         if nltk_tok == "ptb":
             self.nltk_tokenize = TreebankWordTokenizer().tokenize
-            self.nltk_detokenize = TreebankWordDetokenizer().detokenize
         else: raise ValueError("nltk_tok must be in ['ptb'].")
     
     def get_nltk_embeddings(self, sentences):
         """
         Obtain embeddings for each NLTK-tokenized tokens, by mean-pooling the Sentencepiece-BERT style subword embeddings.
         """
+        # Get the list of NLTK tokens for each sentence
+        nltk_tokens_list = [self.nltk_tokenize(sentence) for sentence in sentences]
+
         # Tokenize the sentences using the tokenizer
-        tokenized_sentences = self.tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
+        tokenized_sentences = self.tokenizer([' '.join(sentence) for sentence in nltk_tokens_list], padding=True, truncation=True, return_tensors="pt")
 
         # Convert the tokenized sentences to input_ids and attention_masks
         input_ids = tokenized_sentences.input_ids.to(self.device)
@@ -89,9 +91,6 @@ class BertDiora(nn.Module):
         else:
             outputs = self.model(input_ids, attention_mask=attention_masks)
         embeddings = outputs[0]
-
-        # Get the list of NLTK tokens for each sentence
-        nltk_tokens_list = [self.nltk_tokenize(sentence) for sentence in sentences]
 
         # Match the transformer subwords to the NLTK tokens
         index_map_list = []
