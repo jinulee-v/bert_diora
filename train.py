@@ -10,8 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 
-# from model.model import Paraphraser -> Paraphraser is imported based on args.loss_fn
-from bert_diora.model import BertDiora
+from bert_diora.models import BertDiora, BertDora
 from bert_diora.utils import TokenizedLengthSampler
 
 def main(args):
@@ -52,8 +51,12 @@ def main(args):
     for arg, value in sorted(vars(args).items()):
         logger.info("- %s: %r", arg, value)
     logger.info("")
-        
-    model = BertDiora(
+    
+    Arch = {
+        "diora": BertDiora,
+        "dora": BertDora,
+    }[args.arch]
+    model = Arch(
         args.model_id,
         freeze=not args.unfreeze,
         device=device
@@ -180,6 +183,7 @@ if __name__ == "__main__":
     # Base model/checkpoint configuration
     parser.add_argument("--from_checkpoint", required=False, default=None, help="Pretrained checkpoint to load and resume training.")
     parser.add_argument("--model_id", required=False, default="bert-base-uncased", help="Base model for DIORA architecture.")
+    parser.add_argument("--arch", required=False, default="diora", choices=["diora", "dora"], help="Recursive autoencoder architecture")
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=8, help="training batch size")
@@ -197,7 +201,7 @@ if __name__ == "__main__":
 
     # Checkpoint configs
     parser.add_argument("--model_store_path", required=False, default='checkpoints', help="Directory to store model checkpoints.")
-    parser.add_argument("--model_postfix", required=False, help="Name for the model. defaulted to {model_id}-DIORA")
+    parser.add_argument("--model_postfix", required=False, help="Name for the model. defaulted to {model_id}-arch")
     parser.add_argument("--secure", required=False, action="store_true", help="")
 
     args = parser.parse_args()
@@ -205,6 +209,6 @@ if __name__ == "__main__":
     # Post-modification of args
 
     if args.model_postfix is None:
-        args.model_postfix = args.model_id + '-DIORA'
+        args.model_postfix = args.model_id + '-' + args.arch
 
     main(args)
