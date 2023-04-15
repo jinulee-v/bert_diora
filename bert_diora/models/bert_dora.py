@@ -30,13 +30,19 @@ def flatten_tri(begin, end, max_length):
     return (max_length + 1) * max_length // 2 - (max_length - length + 2) * (max_length - length + 1) // 2   \
            + begin
 
-class BertDiora(nn.Module):
+class BertDora(nn.Module):
     """
-    Re-implementation of DIORA using pretrained transformers (e.g. BERT).
+    Deep Outside-only Recursive Autoencoders.
+    We only use the outside pass, starting from the sentence embedding and comparing the cosine similarity with [MASK] embeddings.
+    (bottom-up) in_vectors = ReLU(MLP(mean(bert[i:j])))
+    (top-down) out_vectors = [MASK] embeddings
+
+    pool: 'mean' for mean-pooling, or 'bos' for BOS-token sampling([CLS] for bert). 
     """
 
-    def __init__(self, model_id: str='bert-base-uncased', freeze: bool=True, nltk_tok: str="ptb", device = torch.device('cpu')):
-        super(BertDiora, self).__init__()
+    def __init__(self, model_id: str='bert-base-uncased', nltk_tok: str="ptb", device = torch.device('cpu'),
+                 freeze: bool=True):
+        super(BertDora, self).__init__()
 
         # Retrieve size first
         config = AutoConfig.from_pretrained(model_id)
@@ -54,6 +60,15 @@ class BertDiora(nn.Module):
         self.bilinear = nn.Bilinear(self.size, self.size, 1, bias=False).to(device)
         # Root bias for outside pass
         self.root_bias = nn.Parameter(torch.zeros(self.size)).to(device)
+        # Inside function: MLP (maps mean-pooled word vectors to size-dimension)
+        self.inside_mlp = nn.Sequential(
+            nn.Linear(self.size, self.size),
+            nn.ReLU(),
+        ).to(device)
+        self.inside_score_mlp = nn.Sequential(
+            nn.Linear(self.size, 1),
+            nn.Sigmoid(),
+        ).to(device)
 
         # Initialize parameters
         for p in self.parameters():
@@ -64,7 +79,12 @@ class BertDiora(nn.Module):
         # (after the initialization to prevent BERT being reset)
         self.model: PreTrainedModel = AutoModel.from_pretrained(model_id).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.mask_token = self.tokenizer.mask_token
+        self.mask_token_id = self.tokenizer.mask_token_id
         self.freeze = freeze
+        if self.freeze:
+            for p in self.model.parameters():
+                p.requires_grad = False
 
         if nltk_tok == "ptb":
             self.nltk_tokenize = TreebankWordTokenizer().tokenize
@@ -85,11 +105,7 @@ class BertDiora(nn.Module):
         attention_masks = tokenized_sentences.attention_mask.to(self.device)
 
         # Generate embeddings using the transformer model
-        if self.freeze:
-            with torch.no_grad():
-                outputs = self.model(input_ids, attention_mask=attention_masks)
-        else:
-            outputs = self.model(input_ids, attention_mask=attention_masks)
+        outputs = self.model(input_ids, attention_mask=attention_masks)
         embeddings = outputs[0]
 
         # Match the transformer subwords to the NLTK tokens
@@ -123,6 +139,49 @@ class BertDiora(nn.Module):
         
         return nn.utils.rnn.pad_sequence(result_embeddings), [sent_emb.size(0) for sent_emb in result_embeddings]
 
+    def get_mask_embeddings(self, sentences):
+        """
+        Obtain embeddings for each NLTK-tokenized tokens, by mean-pooling the Sentencepiece-BERT style subword embeddings.
+        """
+        batch_size = len(sentences)
+
+        # Get the list of NLTK tokens for each sentence
+        nltk_tokens_list_base = [self.nltk_tokenize(sentence) for sentence in sentences]
+        max_len = max(len(sent) for sent in nltk_tokens_list_base)
+
+        result_embeddings = []
+        for mask_idx in range(max_len):
+            # Mask out i-th token
+            nltk_tokens_list = nltk_tokens_list_base[:]
+            for sent in nltk_tokens_list:
+                sent[mask_idx] = self.mask_token # [MASK]
+
+            # Tokenize the sentences using the tokenizer
+            tokenized_sentences = self.tokenizer([' '.join(sentence) for sentence in nltk_tokens_list], padding=True, truncation=True, return_tensors="pt")
+            mask_token_index = torch.argmax((tokenized_sentences == self.mask_token_id).to(torch.long))
+            # reshape mask_token_index for torch.gather
+            mask_token_index = mask_token_index.unsqueeze(0).unsqueeze(2).tile(batch_size, 1, self.size) # batch_size * 1 * size
+
+            # Convert the tokenized sentences to input_ids and attention_masks
+            input_ids = tokenized_sentences.input_ids.to(self.device)
+            attention_masks = tokenized_sentences.attention_mask.to(self.device)
+
+            # Generate embeddings using the transformer model
+            if self.freeze:
+                with torch.no_grad():
+                    outputs = self.model(input_ids, attention_mask=attention_masks)
+            else:
+                outputs = self.model(input_ids, attention_mask=attention_masks)
+            embeddings = outputs[0]
+
+            # Compute [MASK] embeddings
+            mask_embeddings = torch.gather(embeddings, mask_token_index) # batch_size * 1 * size
+            result_embeddings.append(mask_embeddings)
+
+        result_embeddings = torch.cat(result_embeddings, dim=1) # batch_size * length * size
+        
+        return result_embeddings.transpose(0, 1) # seq_len * batch_size * size
+
 
     def forward(self, sentences: List[str]):# Tokenize the sentence using NLTK
         """
@@ -135,40 +194,19 @@ class BertDiora(nn.Module):
         base_vecs = word_embeddings # To reduce dimension of word vectors, modify here
         max_len = max(sent_lengths)
 
-        # Inside pass, batchified
+        # Pseudo-inside pass (simulated)
+        word_embeddings, sent_lengths = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
         inside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
-        inside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
         # base case for inside pass
-        inside_vecs[:base_vecs.size(0)] = base_vecs
-
-        for length in range(2, max_len+1):
+        inside_vecs[:base_vecs.size(0)] = word_embeddings
+        # spans are mean-pooled
+        for length in range(max_len-1, 0, -1):
             for begin in range(0, max_len+1-length):
                 # span: begin ..(length).. end
                 end = begin+length
-                # Iterate through inside contexts
-                context_list_left = [flatten_tri(begin, context, max_len) for context in range(begin+1, end)]
-                context_list_right = [flatten_tri(context, end, max_len) for context in range(begin+1, end)]
-                # left: [begin:context]; right: [context:end]
-                left = inside_vecs[context_list_left] # n_span * batch_size * size
-                right = inside_vecs[context_list_right]  # n_span * batch_size * size
-
-                context_score = (
-                    self.bilinear(left, right) \
-                    + inside_scores[context_list_left] \
-                    + inside_scores[context_list_right]
-                ) # n_span * batch_size * 1
-                context_vec = self.compose_mlp(
-                    torch.cat([left, right], dim=2) # n_span * batch_size * (2*size)
-                ) # n_span * batch_size * size
-
-                # apply softmax normalization to context_score
-                inside_score_weight = torch.softmax(context_score, dim=0) # n_span * batch_size * 1
-                # Weighted mean of scores/vecotrs
-                inside_score = torch.sum(inside_score_weight * context_score, dim=0) # batch_size * 1
-                inside_vec = torch.sum(inside_score_weight * context_vec, dim=0) # batch_size * size
-                # Update results
-                inside_scores[flatten_tri(begin, end, max_len)] = inside_score
-                inside_vecs[flatten_tri(begin, end, max_len)] = inside_vec
+                inside_vecs[flatten_tri(begin, end, max_len)] = torch.mean(word_embeddings[begin:end], dim=0)
+        inside_vecs = self.inside_mlp(inside_vecs) # seq_len * batch_size * size
+        inside_scores = self.inside_score_mlp(inside_vecs)
 
         # Outside pass batchified
         # Unlike the inside pass, outside pass should take consider of different sequence lengths
