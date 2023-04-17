@@ -112,7 +112,7 @@ def main(args):
                 if (epoch, i) <= resume_epoch_step: 
                     continue
 
-            sent, _ = batch
+            sent = batch
             try:
                 # forward + backward + optimize
                 loss = model(sent)
@@ -141,7 +141,7 @@ def main(args):
                     dev_loss = 0
                     first_batch=True
                     for dev_batch in dev_loader:
-                        dev_sents, _ = dev_batch
+                        dev_sents = dev_batch
                         if first_batch:
                             # test_input = gen_inputs[0]
                             # test_outputs = model.generate([test_input])[0]
