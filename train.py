@@ -162,8 +162,6 @@ def main(args):
                 if dev_loss/total < min_loss:
                     logger.info(f"Updating min_loss = {min_loss} -> {dev_loss/total}")
                     min_loss = dev_loss / total
-                    if args.maintain_best_chkpt_only:
-                        os.remove(os.path.join(model_store_path, name))
                     logger.info("Save model checkpoint because reduced loss...")
                     name = f"Model_{args.model_postfix}_epoch_{epoch}_step_{i+1}.pt"
                     torch.save(model.state_dict(), os.path.join(model_store_path, name))
