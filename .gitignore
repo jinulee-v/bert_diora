@@ -6,8 +6,10 @@ pyvenv.cfg
 __pycache__
 share
 
-# Raw data distribution
-data/ptb/*
+# Generated data
+data/ptb/wsj_bin
+data/ptb_*.txt
+
 # Model checkpoints
 checkpoints
 
