@@ -9,6 +9,7 @@ FACTOR = "right"
 
 if __name__ == "__main__":
     for folder in os.listdir(SOURCE):
+        print(folder)
         os.makedirs(DESTINATION + folder, exist_ok=True)
         for file in os.listdir(SOURCE + folder):
             with open(os.path.join(SOURCE, folder, file), "r") as rf:
@@ -16,8 +17,6 @@ if __name__ == "__main__":
                     for tree in rf.read().split("\n\n"):
                         if not tree.split():
                             continue
-                        print("============================================")
-                        print(tree)
                         tree = Tree.fromstring(tree)
                         chomsky_normal_form(tree, FACTOR)
                         wf.write(str(tree) + "\n\n")

@@ -61,7 +61,6 @@ def main(args):
     }[args.arch]
     model = Arch(
         args.model_id,
-        freeze=not args.unfreeze,
         device=device
     ).to(device)
 
@@ -70,13 +69,10 @@ def main(args):
         test_data = file.readlines()
         test_data = [Tree.fromstring(x) for x in test_data]
     test_data_flattened = [TreebankWordDetokenizer().detokenize(x.leaves()) for x in test_data]
-    test_loader = DataLoader(test_data_flattened, batch_sampler=TokenizedLengthSampler(test_data_flattened, args.batch_size, seed=args.torch_seed))
+    test_loader = DataLoader(test_data_flattened, shuffle=False, batch_size=args.batch_size)
 
     model.eval()
     epoch_size = len(test_loader)
-
-    pred_trees = []
-    gold_trees = []
 
     if args.remove_trivial_spans:
         def spans(tree, max_len):
@@ -84,12 +80,15 @@ def main(args):
             Convert a parse tree into a list of spans. Remove trivial spans, that is length==max_len or length==1
             """
             if isinstance(tree, Tree):
-                if len(tree.leaves()) == max_len:
-                    return [].extend([spans(child) for child in tree])
-                elif len(tree.leaves()) == 1:
+                if len(tree.leaves()) == 1:
                     return []
+                childs = []
+                for child in tree:
+                    childs.extend(spans(child, max_len))
+                if len(tree.leaves()) == max_len:
+                    return childs
                 else:
-                    return [tree.leaves()].extend([spans(child) for child in tree])
+                    return [tree.leaves()] + childs
             else:
                 return []
     else:
@@ -98,30 +97,24 @@ def main(args):
             Convert a parse tree into a list of spans.
             """
             if isinstance(tree, Tree):
-                return [tree.leaves()].extend([spans(child) for child in tree])
+                childs = []
+                for child in tree:
+                    childs.extend(spans(child, _))
+                return [tree.leaves()] + childs
             else:
                 return []
 
+    pred_trees = []
     for i, batch in enumerate(tqdm(test_loader, total=epoch_size)):
-        sents, idx = batch
+        sents = batch
         with torch.no_grad():
             pred_batch = model.parse(sents)
             pred_batch = [spans(tree, len(tree.leaves())) for tree in pred_batch]
-            # try:
-            #     trees = model.parse(batch)
-            # except Exception as e:
-            #     logger.warning(str(e))
-            #     logger.info("Exception occured; skip batch")
-            #     gc.collect()
-            #     torch.cuda.empty_cache()
-            #     gc.collect()
-            #     torch.cuda.empty_cache()
-
-        gold_batch = [spans(test_data[i], len(test_data[i].leaves())) for i in idx]
         
         pred_trees.extend(pred_batch)
-        gold_trees.extend(gold_batch)
-
+        
+    
+    gold_trees = [spans(tree, len(tree.leaves())) for tree in test_data]
     # Evaluate F1 score
     p_list = []
     r_list = []
@@ -134,6 +127,8 @@ def main(args):
         fn = len(gold_tree) - tp
         fp = len(pred_tree) - tp
         
+        if len(gold_tree) < 1 or len(pred_tree) < 1:
+            continue # prevent zero division
         # append
         p_list.append(tp / (tp+fp))
         r_list.append(tp / (tp+fn))
@@ -143,9 +138,9 @@ def main(args):
     logger.info("F1 score")
     logger.info(f"  avg: {sum(f1_list) / len(f1_list)}")
     logger.info(f"  min: {sorted_f1_list[0]}")
-    logger.info(f"  q1 : {sorted_f1_list[1*len(f1_list)/4]}")
-    logger.info(f"  q2 : {sorted_f1_list[2*len(f1_list)/4]}")
-    logger.info(f"  q3 : {sorted_f1_list[3*len(f1_list)/4]}")
+    logger.info(f"  q1 : {sorted_f1_list[1*len(f1_list)//4]}")
+    logger.info(f"  q2 : {sorted_f1_list[2*len(f1_list)//4]}")
+    logger.info(f"  q3 : {sorted_f1_list[3*len(f1_list)//4]}")
     logger.info(f"  max: {sorted_f1_list[-1]}")
 
         
@@ -161,7 +156,7 @@ if __name__ == "__main__":
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=8, help="training batch size")
-    parser.add_argument("--remove_trivial_spans", required=False, default=True, help="Remove trivial span when evaluating F1 score.")
+    parser.add_argument("--remove_trivial_spans", required=False, action="store_true", help="Remove trivial span when evaluating F1 score.")
 
     # PyTorch/CUDA configuration
     parser.add_argument("--gpu", type=int, default=0, help="CUDA index for training")

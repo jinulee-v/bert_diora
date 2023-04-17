@@ -28,7 +28,6 @@ class TokenizedLengthSampler(Sampler[List[int]]):
         self.length_batches = len(batches)
         g_cpu = torch.Generator()
         g_cpu.manual_seed(seed)
-        self.batch_indices = torch.randperm(n=self.length_batches, dtype=torch.long, generator=g_cpu).tolist()
         self.batches = [batches[i] for i in self.batch_indices]
         self.seq_lengths = seq_lengths
 
@@ -36,5 +35,5 @@ class TokenizedLengthSampler(Sampler[List[int]]):
         return self.length_batches
     
     def __iter__(self) -> Iterator[List[int]]:
-        for batch, idx in (self.batches, self.batch_indices):
-            yield batch, idx
+        for batch in self.batches:
+            yield batch

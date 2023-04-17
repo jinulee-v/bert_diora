@@ -305,22 +305,21 @@ class BertDiora(nn.Module):
                     + split_scores[context_list_left] \
                     + split_scores[context_list_right]
                 ) # n_span * batch_size * 1
-                split_scores[flatten_tri(begin, end, max_len)] = split_score
+                split_scores[flatten_tri(begin, end, max_len)], _ = torch.max(split_score, dim=0)
                 # Reveal split that provides maximum score
                 best_split = torch.argmax(split_score.squeeze(2), dim=0).tolist() # batch_size
                 best_split = [[context_list_left[i], context_list_right[i]] for i in best_split]
-                best_split_pointers[flatten_tri(begin, end, max_len), :, :] = torch.tensor(best_split, dtype=torch.long, device=best_split_pointers)
+                best_split_pointers[flatten_tri(begin, end, max_len), :, :] = torch.tensor(best_split, dtype=torch.long, device=best_split_pointers.device)
 
-        best_split_pointers =  best_split_pointers.tolist()
         trees = []
         # Reveal the parse tree by backtracking
-        for i, len in enumerate(len):
-            pointers = best_split_pointers[i]
+        for i, length in enumerate(sent_lengths):
+            pointers = best_split_pointers[:, i].tolist()
             tokens = nltk_tokens_list[i]
             def backtrack(idx):
                 if idx < max_len:
                     return Tree('', [tokens[idx]]) # Base case
                 else:
-                    return Tree('', [Tree(backtrack(pointers[idx][0])), Tree(backtrack(pointers[idx][1]))])
-            trees.append(backtrack(len))
+                    return Tree('', [backtrack(pointers[idx][0]), backtrack(pointers[idx][1])])
+            trees.append(backtrack(flatten_tri(0, length, max_len)))
         return trees
