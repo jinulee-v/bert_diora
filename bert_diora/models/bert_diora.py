@@ -6,6 +6,7 @@ import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer, AutoConfig, PreTrainedModel
 
 from nltk.tokenize.treebank import TreebankWordTokenizer
+from nltk import Tree
 
 torch.autograd.set_detect_anomaly(True)
 import time
@@ -251,3 +252,75 @@ class BertDiora(nn.Module):
         loss /= sum(sent_lengths) # normalize
 
         return loss
+
+    def parse(self, sentences: List[str]):
+        batch_size = len(sentences)
+        # Get the list of NLTK tokens for each sentence
+        nltk_tokens_list = [self.nltk_tokenize(sentence) for sentence in sentences]
+
+        word_embeddings, sent_lengths = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
+        base_vecs = word_embeddings # To reduce dimension of word vectors, modify here
+        max_len = max(sent_lengths)
+
+        # CYK algorithm (very much similar to the inside pass), batchified
+        inside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
+        inside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
+        split_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
+        best_split_pointers = torch.zeros([flatten_tri_size(max_len), batch_size, 2], dtype=torch.long, device=self.device)
+        # base case for inside pass
+        inside_vecs[:base_vecs.size(0)] = base_vecs
+
+        for length in range(2, max_len+1):
+            for begin in range(0, max_len+1-length):
+                # span: begin ..(length).. end
+                end = begin+length
+                # Iterate through inside contexts
+                context_list_left = [flatten_tri(begin, context, max_len) for context in range(begin+1, end)]
+                context_list_right = [flatten_tri(context, end, max_len) for context in range(begin+1, end)]
+                # left: [begin:context]; right: [context:end]
+                left = inside_vecs[context_list_left] # n_span * batch_size * size
+                right = inside_vecs[context_list_right]  # n_span * batch_size * size
+
+                context_score = (
+                    self.bilinear(left, right) \
+                    + inside_scores[context_list_left] \
+                    + inside_scores[context_list_right]
+                ) # n_span * batch_size * 1
+                context_vec = self.compose_mlp(
+                    torch.cat([left, right], dim=2) # n_span * batch_size * (2*size)
+                ) # n_span * batch_size * size
+
+                # apply softmax normalization to context_score
+                inside_score_weight = torch.softmax(context_score, dim=0) # n_span * batch_size * context_size
+                # Weighted mean of scores/vecotrs
+                inside_score = torch.sum(inside_score_weight * context_score, dim=0) # batch_size * context_size
+                inside_vec = torch.sum(inside_score_weight * context_vec, dim=0) # batch_size * size
+                # Update results
+                inside_scores[flatten_tri(begin, end, max_len)] = inside_score
+                inside_vecs[flatten_tri(begin, end, max_len)] = inside_vec
+
+                # Calculate split scores
+                split_score = (
+                    inside_score_weight \
+                    + split_scores[context_list_left] \
+                    + split_scores[context_list_right]
+                ) # n_span * batch_size * 1
+                split_scores[flatten_tri(begin, end, max_len)] = split_score
+                # Reveal split that provides maximum score
+                best_split = torch.argmax(split_score.squeeze(2), dim=0).tolist() # batch_size
+                best_split = [[context_list_left[i], context_list_right[i]] for i in best_split]
+                best_split_pointers[flatten_tri(begin, end, max_len), :, :] = torch.tensor(best_split, dtype=torch.long, device=best_split_pointers)
+
+        best_split_pointers =  best_split_pointers.tolist()
+        trees = []
+        # Reveal the parse tree by backtracking
+        for i, len in enumerate(len):
+            pointers = best_split_pointers[i]
+            tokens = nltk_tokens_list[i]
+            def backtrack(idx):
+                if idx < max_len:
+                    return Tree('', [tokens[idx]]) # Base case
+                else:
+                    return Tree('', [Tree(backtrack(pointers[idx][0])), Tree(backtrack(pointers[idx][1]))])
+            trees.append(backtrack(len))
+        return trees

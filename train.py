@@ -112,9 +112,10 @@ def main(args):
                 if (epoch, i) <= resume_epoch_step: 
                     continue
 
+            sent, _ = batch
             try:
                 # forward + backward + optimize
-                loss = model(batch)
+                loss = model(sent)
                 loss.backward()
 
                 if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
@@ -140,13 +141,14 @@ def main(args):
                     dev_loss = 0
                     first_batch=True
                     for dev_batch in dev_loader:
+                        dev_sents, _ = dev_batch
                         if first_batch:
                             # test_input = gen_inputs[0]
                             # test_outputs = model.generate([test_input])[0]
-                            dev_loss += (model(dev_batch)).item() * len(dev_batch)
+                            dev_loss += (model(dev_sents)).item() * len(dev_sents)
                             first_batch=False
                         else:
-                            dev_loss += (model(dev_batch)).item() * len(dev_batch)
+                            dev_loss += (model(dev_sents)).item() * len(dev_sents)
                 logger.info("=================================================")
                 logger.info(f"epoch {epoch}, step {i}")
                 logger.info(f"dev loss = {dev_loss/total}")
