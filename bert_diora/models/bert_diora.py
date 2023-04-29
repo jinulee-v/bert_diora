@@ -3,7 +3,7 @@ from typing import *
 import torch
 import torch.nn as nn
 
-from transformers import AutoModel, AutoTokenizer, AutoConfig, PreTrainedModel
+from transformers import AutoModelWithLMHead, AutoTokenizer, AutoConfig, PreTrainedModel
 
 from nltk.tokenize.treebank import TreebankWordTokenizer
 from nltk import Tree
@@ -36,7 +36,7 @@ class BertDiora(nn.Module):
     Re-implementation of DIORA using pretrained transformers (e.g. BERT).
     """
 
-    def __init__(self, model_id: str='bert-base-uncased', freeze: bool=True, nltk_tok: str="ptb", device = torch.device('cpu')):
+    def __init__(self, model_id: str='bert-base-uncased', freeze: bool=True, nltk_tok: str="ptb", device = torch.device('cpu'), loss: str="cossim", loss_margin_k: int=20, loss_margin_lambda=1):
         super(BertDiora, self).__init__()
 
         # Retrieve size first
@@ -63,7 +63,7 @@ class BertDiora(nn.Module):
 
         # Load pretrained transformers
         # (after the initialization to prevent BERT being reset)
-        self.model: PreTrainedModel = AutoModel.from_pretrained(model_id).to(device)
+        self.model: PreTrainedModel = AutoModelWithLMHead.from_pretrained(model_id, config=config).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.freeze = freeze
         if self.freeze:
@@ -73,6 +73,12 @@ class BertDiora(nn.Module):
         if nltk_tok == "ptb":
             self.nltk_tokenize = TreebankWordTokenizer().tokenize
         else: raise ValueError("nltk_tok must be in ['ptb'].")
+
+        self.loss = loss
+        self.loss_margin_k = loss_margin_k
+        self.loss_margin_lambda = loss_margin_lambda
+        if not loss in ["cossim", "token_ce", "token_margin"]:
+            raise ValueError("loss must be in ['cossim', 'token_ce', 'token_margin']")
     
     def get_nltk_embeddings(self, sentences):
         """
@@ -89,19 +95,28 @@ class BertDiora(nn.Module):
         attention_masks = tokenized_sentences.attention_mask.to(self.device)
 
         # Generate embeddings using the transformer model
-        outputs = self.model(input_ids, attention_mask=attention_masks)
-        embeddings = outputs[0]
+        outputs = self.model(input_ids, attention_mask=attention_masks, output_hidden_states=True).hidden_states
+        embeddings = outputs[-1]
 
         # Match the transformer subwords to the NLTK tokens
         index_map_list = []
+        single_span_tokens_list = []
         for nltk_tokens in nltk_tokens_list:
             token_ids_list = self.tokenizer.batch_encode_plus(nltk_tokens, add_special_tokens=False, return_attention_mask=False)["input_ids"]
             index_map = []
+            single_span_tokens = []
             for i, token_id in enumerate(token_ids_list):
                 # Keep track of the mapping between NLTK token and transformer token ids
-                index_map += [i] * len(self.tokenizer.decode(token_id).split())
+                nltk_token = self.tokenizer.decode(token_id).split()
+                index_map += [i] * len(nltk_token)
+                if len(token_id) == 1:
+                    single_span_tokens.append(token_id[0])
+                else:
+                    single_span_tokens.append(-1)
+
             index_map += [-1] * (embeddings.size(1) - len(index_map)) # Pad the index_map to max_len(subword)
             index_map_list.append(torch.tensor(index_map))
+            single_span_tokens_list.append(torch.tensor(single_span_tokens))
 
         # Compute mean-pooled embeddings for each NLTK token in each sentence
         result_embeddings = []
@@ -120,8 +135,10 @@ class BertDiora(nn.Module):
                 sentence_embeddings.append(mean_pooled_embedding.unsqueeze(0))
 
             result_embeddings.append(torch.cat(sentence_embeddings, dim=0))
-        
-        return nn.utils.rnn.pad_sequence(result_embeddings), [sent_emb.size(0) for sent_emb in result_embeddings]
+
+        return nn.utils.rnn.pad_sequence(result_embeddings), \
+               [sent_emb.size(0) for sent_emb in result_embeddings], \
+               nn.utils.rnn.pad_sequence(single_span_tokens_list).to(self.device)
 
 
     def forward(self, sentences: List[str]):# Tokenize the sentence using NLTK
@@ -131,7 +148,7 @@ class BertDiora(nn.Module):
         start_time = time.time() # DEBUG
         batch_size = len(sentences)
 
-        word_embeddings, sent_lengths = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
+        word_embeddings, sent_lengths, single_tokens = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
         base_vecs = word_embeddings # To reduce dimension of word vectors, modify here
         max_len = max(sent_lengths)
 
@@ -247,10 +264,36 @@ class BertDiora(nn.Module):
         
         terminal_outside_vecs = outside_vecs[:max_len]
         assert terminal_outside_vecs.size() == base_vecs.size()
-        loss = 1 - torch.cosine_similarity(terminal_outside_vecs, base_vecs, dim=2) # max_len * batch_size
-        loss = torch.sum(loss) # single-element tensor
-        loss /= sum(sent_lengths) # normalize
+        
+        single_tokens = single_tokens.unsqueeze(2) # max_len * batch_size * 1, resize to apply torch.gather()
+        single_tokens_mask = single_tokens != -1
+        single_tokens = single_tokens * single_tokens_mask # To remove all -1 indices
 
+        if self.loss == "cossim":
+            # Cossine similarity loss
+            loss = 1 - torch.cosine_similarity(terminal_outside_vecs, base_vecs, dim=2) # max_len * batch_size
+            loss = torch.sum(loss) # single-element tensor
+            loss /= sum(sent_lengths) # normalize
+        elif self.loss == "token_ce":
+            # Token cross-entropy, recycling the LM_head of the transformer
+            token_probs = torch.log_softmax(self.model.cls(terminal_outside_vecs), dim=2)
+            # Extract token probs, but only when a NLTK token maps to a single BERT token
+            token_probs = torch.gather(token_probs, 2, single_tokens)
+            token_probs = (- token_probs) * single_tokens_mask
+            # compute loss
+            loss = torch.sum(token_probs) / torch.sum(single_tokens_mask)
+        elif self.loss == "token_margin":
+            # Token max_margin, recycling the LM_head of the transformer
+            token_probs = torch.log_softmax(self.model.cls(terminal_outside_vecs), dim=2)
+            margin_tokens = torch.randint(0, self.tokenizer.vocab_size, (max_len, batch_size, self.loss_margin_k)).to(self.device)
+            margin_tokens_mask = single_tokens_mask * (margin_tokens != single_tokens).to(torch.long)
+            # Extract token probs, but only when a NLTK token maps to a single BERT token
+            margin_probs = torch.gather(token_probs, 2, margin_tokens)
+            token_probs = torch.gather(token_probs, 2, single_tokens)
+            margin = (self.loss_margin_lambda - token_probs + margin_probs) * margin_tokens_mask
+            margin = torch.maximum(torch.zeros_like(margin_probs), margin)
+            # compute loss
+            loss = torch.sum(token_probs) / torch.sum(margin_tokens_mask)
         return loss
 
     def parse(self, sentences: List[str]):
