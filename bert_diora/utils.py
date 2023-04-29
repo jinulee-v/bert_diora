@@ -20,15 +20,15 @@ class TokenizedLengthSampler(Sampler[List[int]]):
         indices = list(range(len(data_source)))
         indices = sorted(indices, key=lambda i: seq_lengths[i])
 
-        batches = [indices[:self.length % self.batch_size]]
+        batches = []
+        if self.length % self.batch_size != 0 :
+            batches.append(indices[:self.length % self.batch_size])
         for start in range(self.length % self.batch_size, self.length, batch_size):
             end = start + batch_size
             batches.append(indices[start:end])
-            
+
         self.length_batches = len(batches)
-        g_cpu = torch.Generator()
-        g_cpu.manual_seed(seed)
-        self.batches = [batches[i] for i in self.batch_indices]
+        self.batches = [batches[i] for i in torch.randperm(n=self.length_batches, dtype=torch.long).tolist()]
         self.seq_lengths = seq_lengths
 
     def __len__(self):

@@ -59,7 +59,10 @@ def main(args):
     model = Arch(
         args.model_id,
         freeze=not args.unfreeze,
-        device=device
+        device=device,
+        loss=args.loss,
+        loss_margin_k=args.loss_margin_k,
+        loss_margin_lambda=args.loss_margin_lambda
     ).to(device)
     resume_training = False
     if args.from_checkpoint is not None:
@@ -84,9 +87,9 @@ def main(args):
 
     # Load data
     with open(args.train_data, "r", encoding='UTF-8') as file:
-        train_data = file.readlines()
+        train_data = file.read().splitlines()
     with open(args.dev_data, "r", encoding='UTF-8') as file:
-        dev_data = file.readlines()
+        dev_data = file.read().splitlines()
     train_loader = DataLoader(train_data, batch_sampler=TokenizedLengthSampler(train_data, args.batch_size, seed=args.torch_seed))
     dev_loader = DataLoader(dev_data, batch_sampler=TokenizedLengthSampler(dev_data, args.batch_size, seed=args.torch_seed))
 
@@ -113,7 +116,8 @@ def main(args):
                     continue
 
             sent = batch
-            try:
+            # try:
+            if True:
                 # forward + backward + optimize
                 loss = model(sent)
                 loss.backward()
@@ -123,15 +127,15 @@ def main(args):
                     # zero the parameter gradients
                     optimizer.zero_grad()
                     loss = 0
-            except Exception as e:
-                logger.warning(str(e))
-                logger.info("Exception occured; returning to training")
-                gc.collect()
-                torch.cuda.empty_cache()
-                gc.collect()
-                torch.cuda.empty_cache()
-            finally:
-                loss = 0
+            # except Exception as e:
+            #     logger.warning(str(e))
+            #     logger.info("Exception occured; returning to training")
+            #     gc.collect()
+            #     torch.cuda.empty_cache()
+            #     gc.collect()
+            #     torch.cuda.empty_cache()
+            # finally:
+            #     loss = 0
 
             if i % args.log_interval == args.log_interval-1 or i == epoch_size-1:
                 # Eval phase (on dev set)
@@ -184,12 +188,15 @@ if __name__ == "__main__":
     parser.add_argument("--from_checkpoint", required=False, default=None, help="Pretrained checkpoint to load and resume training.")
     parser.add_argument("--model_id", required=False, default="bert-base-uncased", help="Base model for DIORA architecture.")
     parser.add_argument("--arch", required=False, default="diora", choices=["diora", "dora"], help="Recursive autoencoder architecture")
+    parser.add_argument("--loss", required=False, default="cossim", choices=["cossim", "token_ce", "token_margin"], help="Loss function to apply to DIORA")
+    parser.add_argument("--loss_margin_k", type=int, required=False, default=50, help="(loss=token_margin) How many negative tokens to compare")
+    parser.add_argument("--loss_margin_lambda", type=float, required=False, default=1.0, help="(loss=token_margin) max-margin value")
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=8, help="training batch size")
     parser.add_argument("--update_freq", type=int, default=1, help="gradient accumulation for virtually larger batches")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate (default: Adam optimizer)")
-    parser.add_argument("--epoch", type=int, default=5, help="epoch count")
+    parser.add_argument("--epoch", type=int, default=10, help="epoch count")
     parser.add_argument("--unfreeze", action='store_true', help="If set, we also train the underlying parameter too.")
 
     parser.add_argument("--log_interval", type=int, default=500, help="validating / checkpoint saving interval. Validates at the end of each epoch for default.")
@@ -209,6 +216,7 @@ if __name__ == "__main__":
     # Post-modification of args
 
     if args.model_postfix is None:
-        args.model_postfix = args.model_id + '-' + args.arch
+        short_model_name = args.model_id.split("-")[0].split("_")[0]
+        args.model_postfix = short_model_name + '-' + args.arch + "-" + args.loss
 
     main(args)
