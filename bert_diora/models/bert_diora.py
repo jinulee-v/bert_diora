@@ -291,9 +291,9 @@ class BertDiora(nn.Module):
             margin_probs = torch.gather(token_probs, 2, margin_tokens)
             token_probs = torch.gather(token_probs, 2, single_tokens)
             margin = (self.loss_margin_lambda - token_probs + margin_probs) * margin_tokens_mask
-            margin = torch.maximum(torch.zeros_like(margin_probs), margin)
+            margin = torch.relu(margin)
             # compute loss
-            loss = torch.sum(token_probs) / torch.sum(margin_tokens_mask)
+            loss = torch.sum(margin) / torch.sum(margin_tokens_mask)
         return loss
 
     def parse(self, sentences: List[str]):
