@@ -116,8 +116,7 @@ def main(args):
                     continue
 
             sent = batch
-            # try:
-            if True:
+            try:
                 # forward + backward + optimize
                 loss = model(sent)
                 loss.backward()
@@ -127,15 +126,16 @@ def main(args):
                     # zero the parameter gradients
                     optimizer.zero_grad()
                     loss = 0
-            # except Exception as e:
-            #     logger.warning(str(e))
-            #     logger.info("Exception occured; returning to training")
-            #     gc.collect()
-            #     torch.cuda.empty_cache()
-            #     gc.collect()
-            #     torch.cuda.empty_cache()
-            # finally:
-            #     loss = 0
+            except Exception as e:
+                logger.warning(str(e))
+                logger.info("Exception occured; returning to training")
+                gc.collect()
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.empty_cache()
+            finally:
+                if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
+                    loss = 0
 
             if i % args.log_interval == args.log_interval-1 or i == epoch_size-1:
                 # Eval phase (on dev set)
