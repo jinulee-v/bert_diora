@@ -787,8 +787,8 @@
                                                             (VP (VB add)
                                                                 (NP (JJ significant)
                                                                     (VBG generating)
-                                                                    (NN capacity)))))))))))))))
-     (. .))
+                                                                    (NN capacity))))))))))))))
+     (. .)))
 
 (TOP (S (SBAR-ADV (ADVP (RB Even))
                   (IN if)

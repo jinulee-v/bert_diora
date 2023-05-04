@@ -2,6 +2,7 @@ from typing import List, Iterator
 
 import torch
 from torch.utils.data.sampler import Sampler
+from nltk import Tree
 from nltk.tokenize.treebank import TreebankWordTokenizer
 
 

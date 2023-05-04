@@ -23,7 +23,8 @@ for split in ["train", "dev", "test"]:
                     for tree in trees:
                         tree = Tree.fromstring(tree) # convert to NLTK tree
                         if split == "test":
-                            raw_data.append(tree.pformat(margin=9999999999))
+                            tree = tree.pformat(margin=9999999999)
+                            raw_data.append(tree)
                         else:
                             tree = tree.leaves() # and to list of tokens
                             tree = detok.detokenize(tree, convert_parentheses=True) # and finally to detoked string

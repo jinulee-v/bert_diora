@@ -44,6 +44,7 @@ class BertDiora(nn.Module):
         self.size = config.hidden_size
         self.device = device
         
+        self.word_linear = nn.Linear(self.size, self.size)
         # Compose function: MLP
         self.compose_mlp = nn.Sequential(
             nn.Linear(self.size*2, self.size),
@@ -156,7 +157,7 @@ class BertDiora(nn.Module):
         inside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
         inside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
         # base case for inside pass
-        inside_vecs[:base_vecs.size(0)] = base_vecs
+        inside_vecs[:base_vecs.size(0)] = self.word_linear(base_vecs)
 
         for length in range(2, max_len+1):
             for begin in range(0, max_len+1-length):
@@ -301,7 +302,7 @@ class BertDiora(nn.Module):
         # Get the list of NLTK tokens for each sentence
         nltk_tokens_list = [self.nltk_tokenize(sentence) for sentence in sentences]
 
-        word_embeddings, sent_lengths = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
+        word_embeddings, sent_lengths, _ = self.get_nltk_embeddings(sentences) # seq_len * batch_size * size
         base_vecs = word_embeddings # To reduce dimension of word vectors, modify here
         max_len = max(sent_lengths)
 

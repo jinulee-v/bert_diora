@@ -62,7 +62,18 @@ def main(args):
     model = Arch(
         args.model_id,
         device=device
-    ).to(device)
+    )
+    # Load from checkpoint
+    # assert os.path.isdir(args.model_store_path)
+    # model_load_path = os.path.join(args.model_store_path, args.model_postfix)
+    # assert os.path.isdir(model_load_path)
+    # last_checkpoint = sorted([
+    #     (int(re.search("epoch_([0-9]*)", f).group(1)), int(re.search("step_([0-9]*)", f).group(1)), f) for f in os.listdir(model_load_path) if f.endswith(".pt")], reverse=True
+    # )[0][2]
+    # model_load_path = os.path.join(model_load_path, last_checkpoint)
+    # model.load_state_dict(torch.load(model_load_path, map_location=device))
+    # model.device = device
+    model = model.to(device)
 
     # Load data
     with open(args.test_data, "r", encoding='UTF-8') as file:
@@ -74,76 +85,19 @@ def main(args):
     model.eval()
     epoch_size = len(test_loader)
 
-    if args.remove_trivial_spans:
-        def spans(tree, max_len):
-            """
-            Convert a parse tree into a list of spans. Remove trivial spans, that is length==max_len or length==1
-            """
-            if isinstance(tree, Tree):
-                if len(tree.leaves()) == 1:
-                    return []
-                childs = []
-                for child in tree:
-                    childs.extend(spans(child, max_len))
-                if len(tree.leaves()) == max_len:
-                    return childs
-                else:
-                    return [tree.leaves()] + childs
-            else:
-                return []
-    else:
-        def spans(tree, _):
-            """
-            Convert a parse tree into a list of spans.
-            """
-            if isinstance(tree, Tree):
-                childs = []
-                for child in tree:
-                    childs.extend(spans(child, _))
-                return [tree.leaves()] + childs
-            else:
-                return []
-
     pred_trees = []
     for i, batch in enumerate(tqdm(test_loader, total=epoch_size)):
         sents = batch
         with torch.no_grad():
             pred_batch = model.parse(sents)
-            pred_batch = [spans(tree, len(tree.leaves())) for tree in pred_batch]
+            pred_batch_trees = []
+            for tree in pred_batch:
+                pred_batch_trees.append(tree.pformat(margin=9999999))
         
-        pred_trees.extend(pred_batch)
+        pred_trees.extend(pred_batch_trees)
         
-    
-    gold_trees = [spans(tree, len(tree.leaves())) for tree in test_data]
-    # Evaluate F1 score
-    p_list = []
-    r_list = []
-    f1_list = []
-    for pred_tree, gold_tree in zip(pred_trees, gold_trees):
-        tp = 0
-        for pred_span in pred_tree:
-            if pred_span in gold_tree:
-                tp += 1
-        fn = len(gold_tree) - tp
-        fp = len(pred_tree) - tp
-        
-        if len(gold_tree) < 1 or len(pred_tree) < 1:
-            continue # prevent zero division
-        # append
-        p_list.append(tp / (tp+fp))
-        r_list.append(tp / (tp+fn))
-        f1_list.append((2*tp) / (2*tp + fp + fn))
-    
-    sorted_f1_list = sorted(f1_list)
-    logger.info("F1 score")
-    logger.info(f"  avg: {sum(f1_list) / len(f1_list)}")
-    logger.info(f"  min: {sorted_f1_list[0]}")
-    logger.info(f"  q1 : {sorted_f1_list[1*len(f1_list)//4]}")
-    logger.info(f"  q2 : {sorted_f1_list[2*len(f1_list)//4]}")
-    logger.info(f"  q3 : {sorted_f1_list[3*len(f1_list)//4]}")
-    logger.info(f"  max: {sorted_f1_list[-1]}")
-
-        
+    with open(os.path.join(model_store_path, "parse.txt"), "w", encoding="UTF-8") as file:
+        file.write("\n".join(pred_trees) + "\n")
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -170,8 +124,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Post-modification of args
-
-    if args.model_postfix is None:
-        args.model_postfix = args.model_id + '-' + args.arch
 
     main(args)
