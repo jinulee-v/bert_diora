@@ -16,3 +16,7 @@ checkpoints
 *.pt
 *.log
 *.out
+*.sh
+
+# Evalb: manual download
+Evalb/*
