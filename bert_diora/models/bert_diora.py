@@ -2,6 +2,7 @@ from typing import *
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from transformers import AutoModelWithLMHead, AutoTokenizer, AutoConfig, PreTrainedModel
 
@@ -16,7 +17,9 @@ def flatten_tri_size(max_length):
 
 def flatten_tri(begin, end, max_length):
     """
-    Flattens the index (begin, length) given the max_length.
+    Element-wise torch operation. begin: Tensor, length/max_length = integer.
+
+    Flattens the index (begin, end) given the max_length.
     max_length: 6 -> linear size: 21 (6 * 7 / 2)
     structure:
     20                (len=6)
@@ -26,7 +29,6 @@ def flatten_tri(begin, end, max_length):
      6  7  8  9 10    (len=2)
      0  1  2  3  4  5 (len=1)
     """
-    assert end <= max_length
     length = end - begin
     return (max_length + 1) * max_length // 2 - (max_length - length + 2) * (max_length - length + 1) // 2   \
            + begin
@@ -44,18 +46,21 @@ class BertDiora(nn.Module):
         self.size = config.hidden_size
         self.device = device
         
-        self.word_linear = nn.Linear(self.size, self.size)
+        self.word_linear = nn.Sequential(
+            nn.Linear(self.size, self.size),
+            nn.Tanh()
+        )
         # Compose function: MLP
         self.compose_mlp = nn.Sequential(
             nn.Linear(self.size*2, self.size),
             nn.ReLU(),
             nn.Linear(self.size, self.size),
             nn.ReLU()
-        ).to(device)
+        )
         # Score function: bilinear. Following the DIORA paper, we set bias to False.
-        self.bilinear = nn.Bilinear(self.size, self.size, 1, bias=False).to(device)
+        self.bilinear = nn.Bilinear(self.size, self.size, 1, bias=False)
         # Root bias for outside pass
-        self.root_bias = nn.Parameter(torch.zeros(self.size)).to(device)
+        self.root_bias = nn.Parameter(torch.zeros(self.size))
 
         # Initialize parameters
         for p in self.parameters():
@@ -64,7 +69,7 @@ class BertDiora(nn.Module):
 
         # Load pretrained transformers
         # (after the initialization to prevent BERT being reset)
-        self.model: PreTrainedModel = AutoModelWithLMHead.from_pretrained(model_id, config=config).to(device)
+        self.model: PreTrainedModel = AutoModelWithLMHead.from_pretrained(model_id, config=config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.freeze = freeze
         if self.freeze:
@@ -86,7 +91,7 @@ class BertDiora(nn.Module):
         Obtain embeddings for each NLTK-tokenized tokens, by mean-pooling the Sentencepiece-BERT style subword embeddings.
         """
         # Get the list of NLTK tokens for each sentence
-        nltk_tokens_list = [self.nltk_tokenize(sentence) for sentence in sentences]
+        nltk_tokens_list = [sentence.split() for sentence in sentences]
 
         # Tokenize the sentences using the tokenizer
         tokenized_sentences = self.tokenizer([' '.join(sentence) for sentence in nltk_tokens_list], padding=True, truncation=True, return_tensors="pt")
@@ -141,6 +146,142 @@ class BertDiora(nn.Module):
                [sent_emb.size(0) for sent_emb in result_embeddings], \
                nn.utils.rnn.pad_sequence(single_span_tokens_list).to(self.device)
 
+    def _inside(self, inside_vecs, inside_scores, max_len, batch_size, argmax=False):
+
+        # Argmax instead of weighted mean pooling, as in CYK parsing / S-DIORA.
+        # in such use cases, we record and return the backpointer for each step.
+        if argmax:
+            backpointer = torch.zeros((flatten_tri_size(max_len), batch_size, 2), dtype=torch.long)
+
+        for length in range(2, max_len+1):
+            num_spans = max_len+1-length
+            num_contexts = length - 1
+
+            begin = torch.arange(0, num_spans, 1, device=self.device)
+            end = begin + length
+            context_list_left = flatten_tri(
+                begin.unsqueeze(1), # num_spans * 1
+                begin.unsqueeze(1) + torch.arange(1, num_contexts+1, 1, device=self.device).unsqueeze(0), # num_spans * num_contexts
+                max_len
+            ).reshape(-1) # 1-D tensor of num_spans * num_contexts
+            context_list_right = flatten_tri(
+                begin.unsqueeze(0) + torch.arange(1, num_contexts+1, 1, device=self.device).unsqueeze(1), # num_contexts * num_spans
+                end.unsqueeze(0), # 1 * num_spans
+                max_len
+            ).transpose(0, 1).reshape(-1) # 1-D tensor of num_spans * num_contexts
+            left = inside_vecs[context_list_left]
+            right = inside_vecs[context_list_right]
+
+            # Calculate inside vector/scores
+            context_score = (
+                self.bilinear(left, right) \
+                + inside_scores[context_list_left] \
+                + inside_scores[context_list_right]
+            ).reshape(num_spans, num_contexts, batch_size, 1)
+            context_vec = self.compose_mlp(
+                torch.cat([left, right], dim=2) # n_span * batch_size * (2*size)
+            ).reshape(num_spans, num_contexts, batch_size, self.size)
+            
+            if not argmax:
+                # Weighted mean pooling of scores/vectors
+                # - apply softmax normalization to context_score
+                inside_score_weight = torch.softmax(context_score, dim=1) # num_spans * num_contexts * batch_size * 1
+                # - Weighted mean of scores/vecotrs
+                inside_score = torch.sum(inside_score_weight * context_score, dim=1) # num_spans * batch_size * 1
+                inside_vec = torch.sum(inside_score_weight * context_vec, dim=1) # num_spans * batch_size * self.size
+            else:
+                # argmax pooling of scores/vectors
+                argmax_index = torch.argmax(context_score, dim=1, keepdim=True) # num_spans * 1 * batch_size * 1
+                inside_score = torch.gather(context_score, dim=1, index=argmax_index).squeeze(1)
+                inside_vec = torch.gather(context_vec, dim=1, index=argmax_index).squeeze(1)
+                # backtracking
+                argmax_index_backpointer = argmax_index.squeeze(3) # num_spans * 1 * batch_size
+                context_list_left = context_list_left.reshape(num_spans, num_contexts, 1).tile(1, 1, batch_size) # num_spans * num_contexts * batch_size
+                context_list_right = context_list_right.reshape(num_spans, num_contexts, 1).tile(1, 1, batch_size) # num_spans * num_contexts * batch_size
+                # print(torch.gather(context_list_left, dim=1, index=argmax_index_backpointer).squeeze(1))
+                # print(torch.gather(context_list_right, dim=1, index=argmax_index_backpointer).squeeze(1))
+                # print("=====================")
+                backpointer[flatten_tri(begin, end, max_len), :, 0] = \
+                    torch.gather(context_list_left, dim=1, index=argmax_index_backpointer).squeeze(1)
+                backpointer[flatten_tri(begin, end, max_len), :, 1] = \
+                    torch.gather(context_list_right, dim=1, index=argmax_index_backpointer).squeeze(1)
+            
+            # Update results
+            inside_vec = F.normalize(inside_vec, dim=2) # normalize to unit vector
+            inside_scores[flatten_tri(begin, end, max_len)] = inside_score
+            inside_vecs[flatten_tri(begin, end, max_len)] = inside_vec
+
+        if argmax:
+            return backpointer
+
+    def _outside(self, outside_vecs, outside_scores, inside_vecs, inside_scores, max_len, batch_size):
+        for length in range(max_len-1, 0, -1):
+            # We make two diagonal matrices, and then sum up.
+            # For the following chart,
+            #   a
+            #   b c
+            #   d e f
+            # to batchify outside for [d, e, f]:
+            # - we make two matrices for parents/sisters(left/right sisters),
+            # - zero-mask them with upper/lower triangle matrices,
+            # - sum the two.
+            # (Left: close to far; Right: far to close indexing)
+            # Parents   Left  Right   Sisters   Left  Right
+            #        d: - -   a b            d: - -   c e
+            #        e: b -   - c            e: d -   - f
+            #        f: c a   - -            f: b e   - -
+            # 
+            num_spans = max_len+1-length
+            num_contexts = max_len - length
+
+            begin = torch.arange(0, num_spans, 1, device=self.device)
+            end = begin + length
+            context_list_parent = (
+                torch.tril(flatten_tri( # Left parents
+                    begin.unsqueeze(0) - torch.arange(1, num_contexts+1, 1, device=self.device).unsqueeze(1), # num_contexts * num_spans
+                    end.unsqueeze(0), # 1 * num_spans
+                    max_len
+                ).transpose(0, 1), diagonal=-1) +
+                torch.triu(flatten_tri( # Right parents
+                    begin.unsqueeze(1), # num_spans * 1
+                    end.unsqueeze(1) + torch.arange(num_contexts, 0, -1, device=self.device).unsqueeze(0), # num_spans * num_contexts
+                    max_len
+                ), diagonal=0)
+            ).reshape(-1) # 1-D tensor of num_spans * num_contexts
+            context_list_sister = (
+                torch.tril(flatten_tri( # Left sisters
+                    begin.unsqueeze(0) - torch.arange(1, num_contexts+1, 1, device=self.device).unsqueeze(1), # num_contexts * num_spans
+                    begin.unsqueeze(0), # 1 * num_spans
+                    max_len
+                ).transpose(0, 1), diagonal=-1) +
+                torch.triu(flatten_tri( # Right sisters
+                    end.unsqueeze(1), # num_spans * 1
+                    end.unsqueeze(1) + torch.arange(num_contexts, 0, -1, device=self.device).unsqueeze(0), # num_spans * num_contexts
+                    max_len
+                ), diagonal=0)
+            ).reshape(-1) # 1-D tensor of num_spans * num_contexts
+            parents = outside_vecs[context_list_parent]
+            sisters = inside_vecs[context_list_sister]
+
+            # Calculate outside vector/scores
+            context_score = (
+                self.bilinear(parents, sisters) \
+                + outside_scores[context_list_parent] \
+                + inside_scores[context_list_sister]
+            ).reshape(num_spans, num_contexts, batch_size, 1)
+            context_vec = self.compose_mlp(
+                torch.cat([parents, sisters], dim=2) # n_span * batch_size * (2*size)
+            ).reshape(num_spans, num_contexts, batch_size, self.size)
+            
+            # apply softmax normalization to context_score
+            outside_score_weight = torch.softmax(context_score, dim=1) # num_spans * length-1 * batch_size * 1
+            # Weighted mean of scores/vecotrs
+            outside_score = torch.sum(outside_score_weight * context_score, dim=1) # num_spans * batch_size * 1
+            outside_vec = torch.sum(outside_score_weight * context_vec, dim=1) # num_spans * batch_size * self.size
+            outside_vec = F.normalize(outside_vec, dim=2) # normalize to unit vector
+            # Update results
+            outside_scores[flatten_tri(begin, end, max_len)] = outside_score
+            outside_vecs[flatten_tri(begin, end, max_len)] = outside_vec
 
     def forward(self, sentences: List[str]):# Tokenize the sentence using NLTK
         """
@@ -153,111 +294,23 @@ class BertDiora(nn.Module):
         base_vecs = word_embeddings # To reduce dimension of word vectors, modify here
         max_len = max(sent_lengths)
 
-        # Inside pass, batchified
+        ##### Inside pass, batchified #####
         inside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
         inside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
         # base case for inside pass
-        inside_vecs[:base_vecs.size(0)] = self.word_linear(base_vecs)
+        inside_vecs[:base_vecs.size(0)] = F.normalize(self.word_linear(base_vecs), dim=2)
+        self._inside(inside_vecs, inside_scores, max_len, batch_size)
 
-        for length in range(2, max_len+1):
-            for begin in range(0, max_len+1-length):
-                # span: begin ..(length).. end
-                end = begin+length
-                # Iterate through inside contexts
-                context_list_left = [flatten_tri(begin, context, max_len) for context in range(begin+1, end)]
-                context_list_right = [flatten_tri(context, end, max_len) for context in range(begin+1, end)]
-                # left: [begin:context]; right: [context:end]
-                left = inside_vecs[context_list_left] # n_span * batch_size * size
-                right = inside_vecs[context_list_right]  # n_span * batch_size * size
-
-                context_score = (
-                    self.bilinear(left, right) \
-                    + inside_scores[context_list_left] \
-                    + inside_scores[context_list_right]
-                ) # n_span * batch_size * 1
-                context_vec = self.compose_mlp(
-                    torch.cat([left, right], dim=2) # n_span * batch_size * (2*size)
-                ) # n_span * batch_size * size
-
-                # apply softmax normalization to context_score
-                inside_score_weight = torch.softmax(context_score, dim=0) # n_span * batch_size * 1
-                # Weighted mean of scores/vecotrs
-                inside_score = torch.sum(inside_score_weight * context_score, dim=0) # batch_size * 1
-                inside_vec = torch.sum(inside_score_weight * context_vec, dim=0) # batch_size * size
-                # Update results
-                inside_scores[flatten_tri(begin, end, max_len)] = inside_score
-                inside_vecs[flatten_tri(begin, end, max_len)] = inside_vec
-
-        # Outside pass batchified
+        ##### Outside pass batchified #####
         # Unlike the inside pass, outside pass should take consider of different sequence lengths
         outside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
         outside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
-
         # base case for outside pass
         for i in range(len(sent_lengths)):
-            outside_vecs[flatten_tri(0, max_len, max_len), i] = self.root_bias # 1 * size
+            outside_vecs[flatten_tri(0, max_len, max_len), i] = F.normalize(self.root_bias, dim=0) # 1 * size
+        self._outside(outside_vecs, outside_scores, inside_vecs, inside_scores, max_len, batch_size)
 
-        for length in range(max_len-1, 0, -1):
-            for begin in range(0, max_len+1-length):
-                # span: begin ..(length).. end
-                end = begin+length
-                # Iterate through outside contexts
-                # Left context first...
-                context_list_parent = [flatten_tri(context, end, max_len) for context in range(0, begin)]
-                context_list_sister = [flatten_tri(context, begin, max_len) for context in range(0, begin)]
-                # then Right contexts.
-                context_list_parent += [flatten_tri(begin, context, max_len) for context in range(end+1, max_len+1)]
-                context_list_sister += [flatten_tri(end, context, max_len) for context in range(end+1, max_len+1)]
-
-                # Masking for sequences shorter than max_len
-                mask = torch.zeros(len(context_list_parent), batch_size, 1, requires_grad=False, device=self.device, dtype=torch.float32) # n_span * batch_size * 1
-                for i, sent_len in enumerate(sent_lengths):
-                    mask_list = [0 for context in range(0, begin)]
-                    mask_list += [(0 if context<=sent_len else 1) for context in range(end+1, max_len+1)]
-                    mask_list = torch.tensor(mask_list, dtype=torch.bool)
-                    mask[mask_list, i, :] = -1e10 # mask out spans that exceed the sent_len; not -inf due to softmax-nan issues
-
-                # parent: [context:end]; outside: [context:begin]
-                parent = outside_vecs[context_list_parent] # n_span * batch_size * size
-                sister = inside_vecs[context_list_sister] # n_span * batch_size * size
-                context_score = (
-                    self.bilinear(parent, sister)
-                    + outside_scores[context_list_parent]
-                    + inside_scores[context_list_sister]
-                ) # n_span * batch_size * 1
-                context_score += mask # mask spans that exceed sent_len
-                context_vec =  self.compose_mlp(
-                    torch.cat([parent, sister], dim=2) # n_span * batch_size * (2*size)
-                ) # n_span * batch_size * size
-
-                # apply softmax normalization to context_score
-                outside_score_weight = torch.softmax(context_score, dim=0) # n_span * batch_size * 1
-                outside_score_weight = torch.relu(outside_score_weight + mask)
-                # torch.nan_to_num_(outside_score_weight, nan=0)
-                if torch.any(torch.isnan(context_vec)):
-                    # DEBUG
-                    print(begin, end)
-                    print(parent)
-                    print(sister)
-                    print(context_vec)
-                    print(context_score)
-                    print(outside_score_weight)
-                    exit()
-                # Weighted mean of scores/vecotrs
-                outside_score = torch.sum(outside_score_weight * context_score, dim=0) # batch_size * 1
-                outside_vec = torch.sum(outside_score_weight * context_vec, dim=0) # batch_size * size
-                # Update results
-                outside_scores[flatten_tri(begin, end, max_len)] = outside_score
-                outside_vecs[flatten_tri(begin, end, max_len)] = outside_vec
-
-                # base case for outside pass (that is not maximum length): set after outside pass computation to prevent override
-                if begin == 0:
-                    for i, sent_len in enumerate(sent_lengths):
-                        if length == sent_len and sent_len != max_len:
-                            outside_vecs[flatten_tri(0, sent_len, max_len), i] = self.root_bias # 1 * size
-                            outside_scores[flatten_tri(0, sent_len, max_len), i] = 0 # 1 * size
-
-        # Loss function
+        ##### Loss function #####
         # - The original DIORA applies max-margin loss for negative tokens.
         #   However, in our setting we use aggregated representations of subword tokens, thus cannot be directly extractable
         #   Therefore, we use cosine similarity between the recovered outside vector and original word vectors.
@@ -309,61 +362,33 @@ class BertDiora(nn.Module):
         # CYK algorithm (very much similar to the inside pass), batchified
         inside_vecs = torch.zeros([flatten_tri_size(max_len), batch_size, self.size], device=self.device)
         inside_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
-        split_scores = torch.zeros([flatten_tri_size(max_len), batch_size, 1], device=self.device)
-        best_split_pointers = torch.zeros([flatten_tri_size(max_len), batch_size, 2], dtype=torch.long, device=self.device)
         # base case for inside pass
-        inside_vecs[:base_vecs.size(0)] = base_vecs
+        inside_vecs[:base_vecs.size(0)] = F.normalize(base_vecs, dim=2)
 
-        for length in range(2, max_len+1):
-            for begin in range(0, max_len+1-length):
-                # span: begin ..(length).. end
-                end = begin+length
-                # Iterate through inside contexts
-                context_list_left = [flatten_tri(begin, context, max_len) for context in range(begin+1, end)]
-                context_list_right = [flatten_tri(context, end, max_len) for context in range(begin+1, end)]
-                # left: [begin:context]; right: [context:end]
-                left = inside_vecs[context_list_left] # n_span * batch_size * size
-                right = inside_vecs[context_list_right]  # n_span * batch_size * size
-
-                context_score = (
-                    self.bilinear(left, right) \
-                    + inside_scores[context_list_left] \
-                    + inside_scores[context_list_right]
-                ) # n_span * batch_size * 1
-                context_vec = self.compose_mlp(
-                    torch.cat([left, right], dim=2) # n_span * batch_size * (2*size)
-                ) # n_span * batch_size * size
-
-                # apply softmax normalization to context_score
-                inside_score_weight = torch.softmax(context_score, dim=0) # n_span * batch_size * context_size
-                # Weighted mean of scores/vecotrs
-                inside_score = torch.sum(inside_score_weight * context_score, dim=0) # batch_size * context_size
-                inside_vec = torch.sum(inside_score_weight * context_vec, dim=0) # batch_size * size
-                # Update results
-                inside_scores[flatten_tri(begin, end, max_len)] = inside_score
-                inside_vecs[flatten_tri(begin, end, max_len)] = inside_vec
-
-                # Calculate split scores
-                split_score = (
-                    inside_score_weight \
-                    + split_scores[context_list_left] \
-                    + split_scores[context_list_right]
-                ) # n_span * batch_size * 1
-                split_scores[flatten_tri(begin, end, max_len)], _ = torch.max(split_score, dim=0)
-                # Reveal split that provides maximum score
-                best_split = torch.argmax(split_score.squeeze(2), dim=0).tolist() # batch_size
-                best_split = [[context_list_left[i], context_list_right[i]] for i in best_split]
-                best_split_pointers[flatten_tri(begin, end, max_len), :, :] = torch.tensor(best_split, dtype=torch.long, device=best_split_pointers.device)
+        # Fill the inside vectors first
+        backpointer = self._inside(inside_vecs, inside_scores, max_len, batch_size, argmax=True)
 
         trees = []
         # Reveal the parse tree by backtracking
         for i, length in enumerate(sent_lengths):
-            pointers = best_split_pointers[:, i].tolist()
+            backtrack_ptr = backpointer[:, i, :].cpu()
             tokens = nltk_tokens_list[i]
             def backtrack(idx):
                 if idx < max_len:
-                    return Tree('', [tokens[idx]]) # Base case
+                    # Punctuation labels for proper removal
+                    label = "_"
+                    if tokens[idx] in ".,?!":
+                        label = tokens[idx]
+                    elif tokens[idx] in ":;—…":
+                        label = ":"
+                    elif tokens[idx] in "‘“":
+                        label = "''"
+                    elif tokens[idx] in "\'\"":
+                        label = "``"
+                    elif tokens[idx] in "-":
+                        label = "HYPH"
+                    return Tree(label, [tokens[idx]]) # Base case
                 else:
-                    return Tree('', [backtrack(pointers[idx][0]), backtrack(pointers[idx][1])])
+                    return Tree('_', [backtrack(backtrack_ptr[idx][0]), backtrack(backtrack_ptr[idx][1])])
             trees.append(backtrack(flatten_tri(0, length, max_len)))
         return trees

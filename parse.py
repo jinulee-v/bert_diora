@@ -10,11 +10,10 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 
-from bert_diora.models import BertDiora, BertDora
+from bert_diora.models import BertDiora
 from bert_diora.utils import TokenizedLengthSampler
 
 from nltk import Tree
-from nltk.tokenize.treebank import TreebankWordTokenizer, TreebankWordDetokenizer
 
 def main(args):
     # Set torch
@@ -39,9 +38,9 @@ def main(args):
     stdout_handler.setFormatter(formatter)
     if not args.secure:
         # Remove original log file
-        if os.path.exists(os.path.join(model_store_path, "eval_span_f1.log")):
-            os.remove(os.path.join(model_store_path, "eval_span_f1.log"))
-    file_handler = logging.FileHandler(os.path.join(model_store_path, "eval_span_f1.log"))
+        if os.path.exists(os.path.join(model_store_path, "parse.log")):
+            os.remove(os.path.join(model_store_path, "parse.log"))
+    file_handler = logging.FileHandler(os.path.join(model_store_path, "parse.log"))
     file_handler.setFormatter(formatter)
     logger = logging.getLogger('')
     logger.handlers.clear()
@@ -57,29 +56,28 @@ def main(args):
     
     Arch = {
         "diora": BertDiora,
-        "dora": BertDora,
     }[args.arch]
     model = Arch(
         args.model_id,
         device=device
     )
     # Load from checkpoint
-    # assert os.path.isdir(args.model_store_path)
-    # model_load_path = os.path.join(args.model_store_path, args.model_postfix)
-    # assert os.path.isdir(model_load_path)
-    # last_checkpoint = sorted([
-    #     (int(re.search("epoch_([0-9]*)", f).group(1)), int(re.search("step_([0-9]*)", f).group(1)), f) for f in os.listdir(model_load_path) if f.endswith(".pt")], reverse=True
-    # )[0][2]
-    # model_load_path = os.path.join(model_load_path, last_checkpoint)
-    # model.load_state_dict(torch.load(model_load_path, map_location=device))
-    # model.device = device
+    assert os.path.isdir(args.model_store_path)
+    model_load_path = os.path.join(args.model_store_path, args.model_postfix)
+    assert os.path.isdir(model_load_path)
+    last_checkpoint = sorted([
+        (int(re.search("epoch_([0-9]*)", f).group(1)), int(re.search("step_([0-9]*)", f).group(1)), f) for f in os.listdir(model_load_path) if f.endswith(".pt")], reverse=True
+    )[0][2]
+    model_load_path = os.path.join(model_load_path, last_checkpoint)
+    model.load_state_dict(torch.load(model_load_path, map_location=device))
+    model.device = device
     model = model.to(device)
 
     # Load data
     with open(args.test_data, "r", encoding='UTF-8') as file:
         test_data = file.readlines()
         test_data = [Tree.fromstring(x) for x in test_data]
-    test_data_flattened = [TreebankWordDetokenizer().detokenize(x.leaves()) for x in test_data]
+    test_data_flattened = [' '.join(x.leaves()) for x in test_data]
     test_loader = DataLoader(test_data_flattened, shuffle=False, batch_size=args.batch_size)
 
     model.eval()
@@ -98,6 +96,8 @@ def main(args):
         
     with open(os.path.join(model_store_path, "parse.txt"), "w", encoding="UTF-8") as file:
         file.write("\n".join(pred_trees) + "\n")
+        
+    logger.info("Complete!")
 
 if __name__ == "__main__":
     parser = ArgumentParser()

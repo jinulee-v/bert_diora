@@ -1,6 +1,5 @@
 import os
 from nltk import Tree
-from nltk.tokenize.treebank import TreebankWordDetokenizer
 
 WSJ_SPLIT = {
     "train": ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", 
@@ -9,7 +8,8 @@ WSJ_SPLIT = {
     "dev": ["22"],
     "test": ["23"]
 }
-detok = TreebankWordDetokenizer()
+TRAIN_TREE_MAX_LEN=20
+# TRAIN_TREE_MAX_LEN=9999999
 
 BASE = "data/ptb/wsj_bin"
 for split in ["train", "dev", "test"]:
@@ -27,7 +27,8 @@ for split in ["train", "dev", "test"]:
                             raw_data.append(tree)
                         else:
                             tree = tree.leaves() # and to list of tokens
-                            tree = detok.detokenize(tree, convert_parentheses=True) # and finally to detoked string
-                            raw_data.append(tree)
+                            if len(tree) <= TRAIN_TREE_MAX_LEN:
+                                tree =  ' '.join(tree)
+                                raw_data.append(tree)
     with open(f"data/ptb_{split}.txt", "w", encoding="UTF-8") as split_file:
         split_file.write("\n".join(raw_data) + "\n")

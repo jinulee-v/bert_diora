@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 
-from bert_diora.models import BertDiora, BertDora
+from bert_diora.models import BertDiora
 from bert_diora.utils import TokenizedLengthSampler
 
 def main(args):
@@ -54,7 +54,6 @@ def main(args):
     
     Arch = {
         "diora": BertDiora,
-        "dora": BertDora,
     }[args.arch]
     model = Arch(
         args.model_id,
@@ -64,6 +63,7 @@ def main(args):
         loss_margin_k=args.loss_margin_k,
         loss_margin_lambda=args.loss_margin_lambda
     ).to(device)
+    logger.info(model)
     resume_training = False
     if args.from_checkpoint is not None:
         # Fine-tune from a local checkpoint
@@ -116,26 +116,28 @@ def main(args):
                     continue
 
             sent = batch
-            try:
+            # try:
+            if True:
                 # forward + backward + optimize
                 loss = model(sent)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
                 if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
                     optimizer.step()
                     # zero the parameter gradients
                     optimizer.zero_grad()
                     loss = 0
-            except Exception as e:
-                logger.warning(str(e))
-                logger.info("Exception occured; returning to training")
-                gc.collect()
-                torch.cuda.empty_cache()
-                gc.collect()
-                torch.cuda.empty_cache()
-            finally:
-                if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
-                    loss = 0
+            # except Exception as e:
+            #     logger.warning(str(e))
+            #     logger.info("Exception occured; returning to training")
+            #     gc.collect()
+            #     torch.cuda.empty_cache()
+            #     gc.collect()
+            #     torch.cuda.empty_cache()
+            # finally:
+            #     if i % args.update_freq == args.update_freq - 1 or i == epoch_size-1:
+            #         loss = 0
 
             if i % args.log_interval == args.log_interval-1 or i == epoch_size-1:
                 # Eval phase (on dev set)
@@ -191,15 +193,16 @@ if __name__ == "__main__":
     parser.add_argument("--loss", required=False, default="cossim", choices=["cossim", "token_ce", "token_margin"], help="Loss function to apply to DIORA")
     parser.add_argument("--loss_margin_k", type=int, required=False, default=50, help="(loss=token_margin) How many negative tokens to compare")
     parser.add_argument("--loss_margin_lambda", type=float, required=False, default=1.0, help="(loss=token_margin) max-margin value")
+    parser.add_argument("--max_grad_norm", type=float, required=False, default=5, help="Max L2 norm for radient cipping")
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=8, help="training batch size")
     parser.add_argument("--update_freq", type=int, default=1, help="gradient accumulation for virtually larger batches")
-    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate (default: Adam optimizer)")
-    parser.add_argument("--epoch", type=int, default=10, help="epoch count")
+    parser.add_argument("--lr", type=float, default=2e-3, help="Learning rate (default: Adam optimizer)")
+    parser.add_argument("--epoch", type=int, default=5, help="epoch count")
     parser.add_argument("--unfreeze", action='store_true', help="If set, we also train the underlying parameter too.")
 
-    parser.add_argument("--log_interval", type=int, default=500, help="validating / checkpoint saving interval. Validates at the end of each epoch for default.")
+    parser.add_argument("--log_interval", type=int, default=20000, help="validating / checkpoint saving interval. Validates at the end of each epoch for default.")
     parser.add_argument("--early_stop", type=int, default=4, help="if valid loss does not decrease for `early_stop` validations, stop training.")
 
     # PyTorch/CUDA configuration
